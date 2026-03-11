@@ -1,0 +1,37 @@
+services:
+  vpn-personal:
+    image: vpn-master:latest
+    container_name: vpn-personal
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "1194:1194/udp"
+    environment:
+      - VPN_PORT=1194
+      - VPN_SUBNET=10.8.0.0
+    volumes:
+      - ./data/personal:/etc/openvpn
+    restart: unless-stopped
+
+
+  vpn-work:
+    image: vpn-master:latest
+    container_name: vpn-work
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "1195:1195/udp"
+    environment:
+      - VPN_PORT=1195
+      - VPN_SUBNET=10.8.10.0
+    volumes:
+      - ./data/work:/etc/openvpn
+    restart: unless-stopped
