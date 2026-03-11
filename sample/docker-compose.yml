@@ -1,6 +1,6 @@
 services:
   vpn-personal:
-    image: vpn-master:latest
+    image: dockerdima/docker-vpn:latest
     container_name: vpn-personal
     cap_add:
       - NET_ADMIN
@@ -19,7 +19,7 @@ services:
 
 
   vpn-work:
-    image: vpn-master:latest
+    image: dockerdima/docker-vpn:latest
     container_name: vpn-work
     cap_add:
       - NET_ADMIN
