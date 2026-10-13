@@ -1,80 +1,138 @@
 #!/bin/bash
 set -e
 
-EASYRSA_PKI="$OPENVPN/pki"
+# shellcheck source=common.sh
+. /usr/local/lib/vpn-common.sh
 
-# Inizializza la struttura. In batch init-pki cancella una PKI esistente senza
-# chiedere conferma, quindi va eseguito solo se la cartella non esiste ancora.
-if [ ! -d "$EASYRSA_PKI" ]; then
+validate_env
+
+# CMD usa server.conf con un percorso relativo: così segue anche un OPENVPN diverso
+cd "$OPENVPN"
+
+INTESTAZIONE='# Generato da entrypoint.sh'
+CERT="$PKI/issued/vpn_server.crt"
+
+# --- PKI ---------------------------------------------------------------------
+
+# Un avvio interrotto durante la creazione della PKI lascia il marcatore. Finché
+# esiste manage.sh non emette nulla, quindi nella PKI non c'è niente da conservare.
+if [ -e "$PKI_MARKER" ]; then
+    echo "--- Inizializzazione precedente interrotta: ricomincio da zero ---"
+    rm -rf "$PKI"
+fi
+
+if [ ! -e "$PKI" ]; then
     echo "--- Setting up PKI ---"
-    easyrsa --batch --pki-dir="$EASYRSA_PKI" init-pki
+    touch "$PKI_MARKER"
+    ersa init-pki
+    ersa build-ca nopass
+    ersa gen-dh
+    # Il certificato del server dura quanto la CA invece degli 825 giorni predefiniti
+    ersa --days="$MAX_DAYS" build-server-full vpn_server nopass
+    # Chiave TLS-Auth (Sintassi OpenVPN 2.6+)
+    openvpn --genkey secret "$PKI/ta.key"
+    rm -f "$PKI_MARKER"
 fi
 
-# Ogni passo viene saltato se il suo file esiste già, così un'inizializzazione
-# interrotta riprende da dove si era fermata.
-if [ ! -s "$EASYRSA_PKI/ca.crt" ]; then
-    easyrsa --batch --pki-dir="$EASYRSA_PKI" build-ca nopass
-fi
-if [ ! -s "$EASYRSA_PKI/dh.pem" ]; then
-    # Un gen-dh interrotto lascia un file vuoto che easyrsa rifiuta di sovrascrivere
-    rm -f "$EASYRSA_PKI/dh.pem"
-    easyrsa --batch --pki-dir="$EASYRSA_PKI" gen-dh
-fi
-# Il certificato del server dura quanto la CA (10 anni) invece degli 825 giorni
-# predefiniti di easy-rsa: quando scade nessun client riesce più a connettersi.
-if [ ! -s "$EASYRSA_PKI/issued/vpn_server.crt" ]; then
-    easyrsa --batch --pki-dir="$EASYRSA_PKI" --days=3650 build-server-full vpn_server nopass
-# Quelli già emessi a 825 giorni vengono rinnovati all'avvio quando mancano meno
-# di 30 giorni alla scadenza (la finestra in cui easy-rsa consente il rinnovo).
-elif ! openssl x509 -in "$EASYRSA_PKI/issued/vpn_server.crt" -noout -checkend $((30 * 86400)) > /dev/null; then
-    echo "--- Renewing server certificate ---"
-    easyrsa --batch --pki-dir="$EASYRSA_PKI" --days=3650 renew vpn_server nopass ||
+# Una PKI senza marcatore è considerata completa e non viene mai cancellata
+# (init-pki in batch non chiede conferma). Se manca qualcosa, decide chi la gestisce.
+for f in ca.crt dh.pem issued/vpn_server.crt private/vpn_server.key ta.key; do
+    [ -s "$PKI/$f" ] ||
+        die "PKI incompleta in $PKI ($f mancante o vuoto), probabilmente per un'inizializzazione interrotta di una versione precedente. Rimuovi la cartella pki per ricrearla: i profili già emessi non funzioneranno più."
+done
+
+# Certificato del server: rinnovato quando mancano meno di 30 giorni alla scadenza,
+# oppure se è uno di quelli da 825 giorni emessi dalle versioni precedenti (altrimenti
+# un container sempre acceso lo vedrebbe scadere senza riavvii). easy-rsa consente il
+# rinnovo solo dentro la finestra --renew-days.
+giorni_certificato() {
+    local da a
+    da=$(date -d "$(openssl x509 -in "$CERT" -noout -startdate | cut -d= -f2)" +%s)
+    a=$(date -d "$(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)" +%s)
+    echo $(( (a - da) / 86400 ))
+}
+if ! openssl x509 -in "$CERT" -noout -checkend $((30 * 86400)) >/dev/null || [ "$(giorni_certificato)" -lt 3000 ]; then
+    echo "--- Rinnovo il certificato del server ---"
+    if ! ersa --days="$MAX_DAYS" --renew-days="$MAX_DAYS" renew vpn_server nopass; then
         echo "Errore: rinnovo del certificato del server non riuscito." >&2
+        openssl x509 -in "$CERT" -noout -checkend 0 >/dev/null ||
+            die "il certificato del server è scaduto e non si riesce a rinnovarlo: nessun client potrebbe connettersi."
+    fi
 fi
-if [ ! -s "$EASYRSA_PKI/ta.key" ]; then
-    # Chiave TLS-Auth (Sintassi OpenVPN 2.6+)
-    openvpn --genkey secret "$EASYRSA_PKI/ta.key"
-fi
+echo "--- Certificato del server valido fino al $(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2) ---"
 
 # Con crl-verify una CRL scaduta fa rifiutare tutti i client, quindi viene
 # rigenerata a ogni avvio (la validità è EASYRSA_CRL_DAYS, vedi Dockerfile).
-easyrsa --batch --pki-dir="$EASYRSA_PKI" gen-crl
+ersa gen-crl
 
-# server.conf viene riscritto a ogni avvio, così porta, protocollo e subnet
-# seguono sempre le variabili d'ambiente (e la regola di NAT più sotto).
-# Una configurazione non generata da questo script viene conservata in .bak.
-if [ -f "$OPENVPN/server.conf" ] && ! grep -q '^# Generato da entrypoint.sh' "$OPENVPN/server.conf"; then
-    cp "$OPENVPN/server.conf" "$OPENVPN/server.conf.bak"
+# --- server.conf -------------------------------------------------------------
+
+# server.conf viene riscritto a ogni avvio, così porta, protocollo e subnet seguono
+# sempre le variabili d'ambiente (e la regola di NAT più sotto). Un file non generato
+# da questo script viene conservato prima di essere sostituito.
+if [ -f "$OPENVPN/server.conf" ] && ! grep -q "^$INTESTAZIONE" "$OPENVPN/server.conf"; then
+    COPIA="$OPENVPN/server.conf.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$OPENVPN/server.conf" "$COPIA"
+    echo "--- server.conf non generato da questo script: copiato in $COPIA. Le personalizzazioni vanno in $OPENVPN/server.custom.conf ---"
 fi
 
 # Il tunnel è solo IPv4: senza altro, un client dual-stack continua a usare l'IPv6
-# della sua rete fuori dalla VPN. Lo si instrada nel tunnel, dove il client lo
-# rifiuta. VPN_BLOCK_IPV6=0 lo disattiva: serve ai client con IPv6 disabilitato
-# nel kernel, che non possono configurare l'indirizzo IPv6 e non si connettono.
-REDIRECT_FLAGS="def1 bypass-dhcp"
-IPV6_BLOCK=""
-if [ "${VPN_BLOCK_IPV6:-1}" != 0 ]; then
-    REDIRECT_FLAGS="def1 ipv6 bypass-dhcp"
-    IPV6_BLOCK='push "ifconfig-ipv6 fd15:53b6:dead::2/64 fd15:53b6:dead::1"
-push "block-ipv6"'
+# della sua rete fuori dalla VPN. Lo si instrada nel tunnel, dove il client stesso lo
+# rifiuta (block-ipv6 spinto, OpenVPN 2.5+). Un client più vecchio ignora l'opzione:
+# il suo IPv6 entra nel tunnel e il server lo scarta senza risposta (nessuna perdita,
+# solo timeout). Un block-ipv6 nella configurazione del server non cambia il risultato
+# (provato anche con server-ipv6): non riguarda il traffico che arriva dai client.
+# Chi ha IPv6 disattivato nel kernel non può configurare l'indirizzo IPv6 spinto
+# e non si connette: per questo c'è VPN_BLOCK_IPV6=0.
+# Il predefinito è 1 per un volume nuovo e 0 per un volume creato dalle versioni
+# precedenti, così l'aggiornamento non cambia il comportamento; viene memorizzato
+# per non cambiare al secondo avvio, quando server.conf avrà l'intestazione.
+STATO_IPV6="$OPENVPN/.block-ipv6-default"
+if [ ! -f "$STATO_IPV6" ]; then
+    if [ -f "$OPENVPN/server.conf" ] && ! grep -q "^$INTESTAZIONE" "$OPENVPN/server.conf"; then
+        echo 0 > "$STATO_IPV6"
+    else
+        echo 1 > "$STATO_IPV6"
+    fi
 fi
+if [ -n "${VPN_BLOCK_IPV6:-}" ]; then
+    BLOCCA_IPV6=$(to_bool "$VPN_BLOCK_IPV6"); ORIGINE="VPN_BLOCK_IPV6"
+else
+    BLOCCA_IPV6=$(cat "$STATO_IPV6"); ORIGINE="predefinito del volume"
+fi
+if [ "$BLOCCA_IPV6" = 1 ]; then
+    echo "--- IPv6 dei client: bloccato ($ORIGINE). VPN_BLOCK_IPV6=0 lo disattiva ---"
+    REDIRECT="def1 ipv6 bypass-dhcp"
+    CONF_IPV6='push "ifconfig-ipv6 fd15:53b6:dead::2/64 fd15:53b6:dead::1"
+push "block-ipv6"'
+else
+    echo "--- IPv6 dei client: non bloccato ($ORIGINE). VPN_BLOCK_IPV6=1 lo blocca ---"
+    REDIRECT="def1 bypass-dhcp"
+    CONF_IPV6=""
+fi
+
+IFS=, read -ra DNS <<< "$VPN_DNS"
+CONF_DNS=""
+for d in "${DNS[@]}"; do
+    CONF_DNS+="push \"dhcp-option DNS $d\""$'\n'
+done
 
 echo "--- Building server configuration ---"
 cat <<EOF > "$OPENVPN/server.conf"
-# Generato da entrypoint.sh a ogni avvio: le modifiche manuali vengono sovrascritte.
-port ${VPN_PORT:-1194}
-proto ${VPN_PROTO:-udp}
+$INTESTAZIONE a ogni avvio: le modifiche manuali vengono sovrascritte (usa server.custom.conf).
+port $VPN_PORT
+proto $VPN_PROTO
 dev tun
-ca $EASYRSA_PKI/ca.crt
-cert $EASYRSA_PKI/issued/vpn_server.crt
-key $EASYRSA_PKI/private/vpn_server.key
-dh $EASYRSA_PKI/dh.pem
-tls-auth $EASYRSA_PKI/ta.key 0
-crl-verify $EASYRSA_PKI/crl.pem
-server ${VPN_SUBNET:-10.8.0.0} 255.255.255.0
-push "redirect-gateway $REDIRECT_FLAGS"
-$IPV6_BLOCK
-push "dhcp-option DNS 1.1.1.1"
+ca $PKI/ca.crt
+cert $CERT
+key $PKI/private/vpn_server.key
+dh $PKI/dh.pem
+tls-auth $PKI/ta.key 0
+crl-verify $PKI/crl.pem
+server $VPN_SUBNET 255.255.255.0
+push "redirect-gateway $REDIRECT"
+$CONF_IPV6
+$CONF_DNS
 keepalive 10 120
 cipher AES-256-GCM
 persist-key
@@ -82,10 +140,18 @@ persist-tun
 verb 3
 EOF
 
-# Routing: NAT per tutto ciò che esce dalla subnet VPN, qualunque sia l'interfaccia
-# di uscita. Con network_mode: host le regole sopravvivono al riavvio, da cui il -C.
-NAT_RULE=(POSTROUTING -s "${VPN_SUBNET:-10.8.0.0}/24" ! -d "${VPN_SUBNET:-10.8.0.0}/24" -j MASQUERADE)
+# Righe aggiuntive dell'utente: sopravvivono alla riscrittura di server.conf
+if [ -f "$OPENVPN/server.custom.conf" ]; then
+    { echo; echo "# --- $OPENVPN/server.custom.conf ---"; cat "$OPENVPN/server.custom.conf"; } >> "$OPENVPN/server.conf"
+fi
+
+# --- Routing -----------------------------------------------------------------
+
+# NAT per tutto ciò che esce dalla subnet VPN, qualunque sia l'interfaccia di uscita.
+# Vale per la rete bridge del container, dove le regole spariscono con il container.
+# Con network_mode: host finirebbero nelle tabelle dell'host e non verrebbero mai
+# rimosse (e il FORWARD dell'host potrebbe comunque scartare il traffico): non è supportato.
+NAT_RULE=(POSTROUTING -s "$VPN_SUBNET/24" ! -d "$VPN_SUBNET/24" -j MASQUERADE)
 iptables -t nat -C "${NAT_RULE[@]}" 2>/dev/null || iptables -t nat -A "${NAT_RULE[@]}"
 
 exec "$@"
-
