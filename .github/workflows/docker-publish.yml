@@ -18,7 +18,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # latest follows main; sha-<commit> and <version> (from a vX.Y.Z tag) never move
+      # latest and sha-<commit> come from main; <version> from a vX.Y.Z tag.
+      # A tag run does not publish sha-<commit>, so it cannot overwrite the main build.
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -28,7 +29,7 @@ jobs:
             latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
+            type=sha,enable=${{ github.ref_type == 'branch' }}
             type=semver,pattern={{version}}
 
       - name: Set up QEMU
@@ -42,6 +43,18 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # A release tag is published once: rebuilding it would change an image that
+      # compose files already pin
+      - name: Refuse to overwrite a release
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE: ${{ secrets.DOCKERHUB_USERNAME }}/docker-vpn:${{ steps.meta.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$RELEASE" > /dev/null 2>&1; then
+            echo "::error::$RELEASE already exists and is not overwritten. Publish a new version instead."
+            exit 1
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v5

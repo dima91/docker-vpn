@@ -1,9 +1,8 @@
 # Impostazioni comuni a tutti i servizi VPN.
 # VPN_IMAGE (nel file .env) sostituisce l'immagine, ad esempio con quella di un fork.
-# Se l'immagine non si può scaricare viene costruita dai sorgenti in ../docker.
+# Per costruire l'immagine dai sorgenti in ../docker usa anche docker-compose.build.yml.
 x-vpn: &vpn
   image: ${VPN_IMAGE:-dockerdima/docker-vpn:1.0.0}
-  build: ../docker
   cap_add:
     - NET_ADMIN
   sysctls:
@@ -21,6 +20,8 @@ services:
     environment:
       - PUBLIC_IP=${PUBLIC_IP:-}
       - VPN_PROTO=${VPN_PROTO:-udp}
+      - VPN_BLOCK_IPV6=${VPN_BLOCK_IPV6:-}
+      - VPN_DNS=${VPN_DNS:-}
       - VPN_PORT=1194
       - VPN_SUBNET=10.8.0.0
     volumes:
@@ -35,6 +36,8 @@ services:
     environment:
       - PUBLIC_IP=${PUBLIC_IP:-}
       - VPN_PROTO=${VPN_PROTO:-udp}
+      - VPN_BLOCK_IPV6=${VPN_BLOCK_IPV6:-}
+      - VPN_DNS=${VPN_DNS:-}
       - VPN_PORT=1195
       - VPN_SUBNET=10.8.10.0
     volumes:
