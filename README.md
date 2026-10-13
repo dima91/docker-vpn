@@ -49,7 +49,7 @@ This project provides a straightforward way to set up a personal or small-team V
     docker compose up -d
     ```
 
-    The image is pulled from Docker Hub. If it cannot be pulled, it is built from the `docker` directory instead. On the first start each server creates its certificates, which can take a minute or two; follow it with `docker compose logs -f` and wait for `Initialization Sequence Completed`.
+    The image is pulled from Docker Hub; the sample refers to a published release (see [Image tags](#image-tags)). To build it from the `docker` directory instead, see [Building the image yourself](#building-the-image-yourself). On the first start each server creates its certificates, which can take a minute or two; follow it with `docker compose logs -f` and wait for `Initialization Sequence Completed`. If the container is stopped during this step, the next start begins the setup again.
 
     Each server keeps its data, including the private key of its certificate authority, in `sample/data/<name>`. Keep that directory private and back it up: it is ignored by git on purpose.
 
@@ -65,7 +65,7 @@ To create a new client configuration, run the following command. Replace `my-cli
 docker compose exec vpn-personal manage.sh gen-client my-client
 ```
 
-This generates `my-client.ovpn` in the server's data directory, which is `sample/data/personal/my-client.ovpn` on the host. The file contains the client's private key, so hand it over through a secure channel.
+This generates `my-client.ovpn` in the server's data directory, which is `sample/data/personal/my-client.ovpn` on the host. The file contains the client's private key, so it is readable by root only (mode 600): copy it from the host with `sudo`, and hand it over through a secure channel. Names are 1 to 64 letters, digits, `.`, `_` or `-`, starting with a letter or a digit; `vpn_server` and `ca` are reserved.
 
 The client certificate is valid for 825 days. To choose another validity, add the number of days; `0` means the maximum, 3650 days:
 
@@ -73,7 +73,17 @@ The client certificate is valid for 825 days. To choose another validity, add th
 docker compose exec vpn-personal manage.sh gen-client my-client 365
 ```
 
-To renew a client, revoke it and generate it again with the same name.
+`gen-client` refuses a name that already has a certificate. To renew a client, revoke it and generate it again with the same name.
+
+### Regenerating a profile
+
+When the server's address, port or protocol changes, the profiles already handed out keep the old values. Write them again from the existing certificates, without issuing new ones:
+
+```sh
+docker compose exec vpn-personal manage.sh export-client my-client
+```
+
+The client keeps its certificate and key; only the `remote`, port and protocol lines change. The same command recovers a profile that was deleted or that `gen-client` failed to write.
 
 ### Revoking a client
 
@@ -83,7 +93,7 @@ To revoke an existing client's access, run:
 docker compose exec vpn-personal manage.sh revoke-client my-client
 ```
 
-This revokes the client's certificate and updates the Certificate Revocation List (CRL). The OpenVPN server picks up the change by itself and refuses every new connection from this client.
+This revokes the client's certificate, updates the Certificate Revocation List (CRL) and deletes the client's `.ovpn` file. The OpenVPN server picks up the change by itself and refuses every new connection from this client. If the command is interrupted, run it again: it completes the revocation.
 
 A client that is connected at that moment keeps its current session. To disconnect it right away, restart the server:
 
@@ -101,18 +111,34 @@ The containers are configured through environment variables, set in the `environ
 | `VPN_PORT`       | The port on which the VPN server listens. Must match the port published by the service.              | `1194`                                          |
 | `VPN_PROTO`      | The protocol the VPN server uses, `udp` or `tcp`.                                                    | `udp`                                           |
 | `VPN_SUBNET`     | The `/24` network handed out to the clients. Use a different one for each server.                    | `10.8.0.0`                                      |
-| `VPN_BLOCK_IPV6` | Set to `0` to stop blocking the clients' IPv6 traffic (see below).                                   | `1`                                             |
+| `VPN_DNS`        | DNS servers pushed to the clients, as IP addresses separated by commas.                              | `1.1.1.1`                                       |
+| `VPN_BLOCK_IPV6` | `1` blocks the clients' IPv6 traffic, `0` lets it through (also `true`/`false`, `yes`/`no`, `on`/`off`). See [IPv6](#ipv6). | `1` for a new server, `0` for one created by an older version |
 | `OPENVPN`        | Path to the OpenVPN data directory inside the container, where configs and keys are stored.          | `/etc/openvpn`                                  |
 
-`server.conf` is written again from these variables every time the container starts, so a changed value takes effect with `docker compose up -d`. Manual edits to `server.conf` are overwritten. Profiles already handed out keep the address, port and protocol they were generated with: after changing one of those, generate the clients again.
+Invalid values (a subnet that is not a `/24` network, a port outside 1-65535, a protocol other than `udp` or `tcp`, and so on) stop the container at start with a message that names the variable.
+
+`server.conf` is written again from these variables every time the container starts, so a changed value takes effect with `docker compose up -d`. Manual edits to `server.conf` are overwritten. Profiles already handed out keep the address, port and protocol they were generated with: after changing one of those, run `export-client` for each client.
+
+The container runs on the bridge network. `network_mode: host` is not supported: the NAT rule would end up in the host's tables and stay there after the container is gone.
+
+### Custom server options
+
+To add your own OpenVPN options, put them in `server.custom.conf` in the data directory (`sample/data/personal/server.custom.conf`). Its content is appended to `server.conf` at every start, so it survives the rewrite described above:
+
+```text
+push "route 192.168.77.0 255.255.255.0"
+client-to-client
+```
 
 `VPN_IMAGE` is read by `docker-compose.yml` itself and selects the image to run.
 
 ### IPv6
 
-The tunnel carries IPv4 only. So that a client with IPv6 connectivity does not keep reaching IPv6 sites outside the VPN, the server tells clients to route IPv6 into the tunnel and reject it there. Applications then fall back to IPv4.
+The tunnel carries IPv4 only. So that a client with IPv6 connectivity does not keep reaching IPv6 sites outside the VPN, the server tells clients to route IPv6 into the tunnel and reject it there. Applications then fall back to IPv4. A client older than OpenVPN 2.5 does not know the instruction: its IPv6 traffic still enters the tunnel and is silently dropped by the server, so nothing leaks, but connections over IPv6 wait for a timeout before falling back.
 
-A client whose operating system has IPv6 disabled cannot apply this and fails to connect with `Linux can't add IPv6 to interface tun0`. Either add this line to that client's `.ovpn` file:
+The blocking is on for a server created by this version, and off for a volume created by an older one, so that an upgrade does not stop clients from connecting. The start log says which mode is active and why. Set `VPN_BLOCK_IPV6=1` to turn it on for an upgraded server; setting `0` or `1` always wins over the default.
+
+A client whose operating system has IPv6 disabled cannot apply the blocking and fails to connect with `Linux can't add IPv6 to interface tun0`. Either add this line to that client's `.ovpn` file:
 
 ```text
 pull-filter ignore "ifconfig-ipv6"
@@ -122,7 +148,28 @@ or set `VPN_BLOCK_IPV6=0` on the server, which turns the protection off for all 
 
 ### Certificates
 
-The certificate authority and the server certificate are valid for 10 years. A server certificate that is about to expire is renewed when the container starts, and client profiles keep working after that. When the certificate authority itself expires, the data directory has to be created again together with all client profiles.
+The certificate authority and the server certificate are valid for 10 years, and every start logs the server certificate's expiry date. A server certificate that is within 30 days of expiry, or that was issued with the 825-day validity of older versions, is renewed when the container starts; client profiles keep working after that, because the certificate authority does not change. When the certificate authority itself expires, the data directory has to be created again together with all client profiles.
+
+## Building the image yourself
+
+To run an image built from your checkout instead of a published release, add the build override:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+The image is tagged `docker-vpn:local`, so it is never mistaken for a release.
+
+## Upgrading
+
+An existing data directory keeps working with a newer image, and the certificate authority and the client profiles are not touched. At the first start:
+
+- the server certificate is replaced if it is one of the 825-day certificates of older versions;
+- `server.conf` is rewritten; the previous file is kept as `server.conf.bak.<date>`, and its custom lines belong in `server.custom.conf`;
+- revoked clients start being refused (older versions never read the CRL);
+- the IPv6 blocking stays off, as described in [IPv6](#ipv6).
+
+A setup that an older version left half-built (a `pki` directory with missing files) stops the container with `PKI incompleta`. Remove the `pki` directory to create it again; profiles issued from it are not valid anymore.
 
 ## Image tags
 
@@ -131,8 +178,8 @@ The image is published to Docker Hub as `dockerdima/docker-vpn` whenever the `do
 | Tag            | Meaning                                                                        |
 | :------------- | :----------------------------------------------------------------------------- |
 | `latest`       | The most recent build of `main`. It changes over time.                         |
-| `sha-<commit>` | The build of one commit. It never changes.                                     |
-| `<version>`    | A release, such as `1.0.0`, built from the git tag `v1.0.0`. It never changes. |
+| `sha-<commit>` | The build of one commit of `main`. Re-running the workflow for the same commit rebuilds it. |
+| `<version>`    | A release, such as `1.0.0`, built from the git tag `v1.0.0`. It is published once: the workflow refuses to overwrite an existing version. |
 
 `sample/docker-compose.yml` refers to a release so that the same file always runs the same image. To publish a release:
 
