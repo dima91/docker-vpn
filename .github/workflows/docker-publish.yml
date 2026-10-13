@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - "main"
+    tags:
+      - "v*.*.*"
+    # Only rebuild when the image itself changes (not evaluated for tag pushes)
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker-publish.yml"
 
 jobs:
   docker:
@@ -11,6 +17,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # latest follows main; sha-<commit> and <version> (from a vX.Y.Z tag) never move
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/docker-vpn
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -25,5 +47,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./docker
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/docker-vpn:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
