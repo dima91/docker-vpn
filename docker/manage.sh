@@ -7,7 +7,7 @@ set -e
 uso() {
     echo "Uso: manage.sh gen-client <name> [days] | export-client <name> | revoke-client <name>"
     echo "       gen-client emette un nuovo certificato e scrive il profilo <name>.ovpn;"
-    echo "       'days' è la validità in giorni, opzionale (825 se omesso, 0 per il massimo: $MAX_DAYS)."
+    echo "       'days' è la validità in giorni, opzionale (825 se omesso, al massimo $MAX_DAYS; 0 vale $MAX_DAYS)."
     echo "       export-client riscrive il profilo di un client esistente con l'indirizzo, la porta"
     echo "       e il protocollo attuali del server, senza emettere un nuovo certificato."
 }
@@ -28,6 +28,11 @@ server_pronto() {
     if [ -e "$PKI_MARKER" ] || [ ! -s "$PKI/ta.key" ]; then
         die "il server non ha ancora finito l'inizializzazione, riprova tra poco."
     fi
+}
+
+# scarta_emissione_incompleta <client>: toglie richiesta e chiave se manca il certificato firmato
+scarta_emissione_incompleta() {
+    [ -e "$PKI/issued/$1.crt" ] || rm -f "$PKI/reqs/$1.req" "$PKI/private/$1.key"
 }
 
 # Indirizzo da scrivere nei profili: PUBLIC_IP, altrimenti quello visto da ifconfig.me
@@ -54,7 +59,7 @@ scrivi_profilo() {
         fi
     done
 
-    echo "--- Creating file $client.ovpn ---"
+    echo "--- Scrivo il profilo $client.ovpn ---"
     rm -f "$file"
     (
         umask 077
@@ -87,7 +92,7 @@ EOF
         echo "Errore: scrittura di $file non riuscita." >&2
         return 1
     }
-    echo "Ready! File created in $file"
+    echo "Pronto! Profilo scritto in $file"
 }
 
 case "$1" in
@@ -100,8 +105,11 @@ case "$1" in
         if [ "$DAYS" = 0 ]; then
             DAYS=$MAX_DAYS
         fi
-        if [ -n "$DAYS" ] && ! [[ "$DAYS" =~ ^[1-9][0-9]*$ ]]; then
-            die "'days' deve essere un numero intero di giorni."
+        if [ -n "$DAYS" ]; then
+            [[ "$DAYS" =~ ^[1-9][0-9]*$ ]] || die "'days' deve essere un numero intero di giorni."
+            # Prima il numero di cifre: un valore enorme farebbe sbagliare il confronto aritmetico
+            { [ "${#DAYS}" -le 4 ] && [ "$DAYS" -le "$MAX_DAYS" ]; } ||
+                die "'days' non può superare $MAX_DAYS: un certificato non deve durare più della CA."
         fi
 
         server_pronto
@@ -115,7 +123,13 @@ case "$1" in
         if [ -n "$DAYS" ]; then
             EASYRSA_ARGS+=("--days=$DAYS")
         fi
-        ersa "${EASYRSA_ARGS[@]}" build-client-full "$CLIENT" nopass
+        # Richiesta e chiave senza certificato sono i resti di un'emissione interrotta (il
+        # container fermato durante la firma): easy-rsa non ripartirebbe, il nome resterebbe bloccato
+        scarta_emissione_incompleta "$CLIENT"
+        if ! ersa "${EASYRSA_ARGS[@]}" build-client-full "$CLIENT" nopass; then
+            scarta_emissione_incompleta "$CLIENT"
+            die "emissione del certificato di $CLIENT non riuscita."
+        fi
 
         scrivi_profilo "$CLIENT" "$SERVER_IP" || {
             echo "Il certificato di $CLIENT è stato emesso ma il profilo no: riprova con 'manage.sh export-client $CLIENT'." >&2
@@ -147,7 +161,7 @@ case "$1" in
         # server.conf punta a questa CRL: OpenVPN la rilegge a ogni nuova connessione
         ersa gen-crl
         rm -f "$OPENVPN/$CLIENT.ovpn"
-        echo "Revoked access for $CLIENT"
+        echo "Accesso revocato per $CLIENT"
         ;;
     *)
         uso

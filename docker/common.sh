@@ -53,10 +53,13 @@ validate_env() {
         to_bool "$VPN_BLOCK_IPV6" >/dev/null ||
             die "VPN_BLOCK_IPV6='$VPN_BLOCK_IPV6' non valida: usa 1 o 0 (anche true/false, yes/no, on/off)."
     fi
+    # Solo IPv4: il tunnel non porta IPv6 (con il blocco attivo lo rifiuta, altrimenti esce
+    # fuori dalla VPN) e "dhcp-option DNS" è l'opzione per gli indirizzi IPv4
     local dns
     IFS=, read -ra dns <<< "$VPN_DNS"
+    [ "${#dns[@]}" -gt 0 ] || die "VPN_DNS='$VPN_DNS' non valida: servono indirizzi IPv4 separati da virgole."
     for ip in "${dns[@]}"; do
-        [[ "$ip" =~ ^$ottetto\.$ottetto\.$ottetto\.$ottetto$ || "$ip" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$ ]] ||
-            die "VPN_DNS='$VPN_DNS' non valida: servono indirizzi IP separati da virgole."
+        [[ "$ip" =~ ^$ottetto\.$ottetto\.$ottetto\.$ottetto$ ]] ||
+            die "VPN_DNS='$VPN_DNS' non valida: servono indirizzi IPv4 separati da virgole."
     done
 }

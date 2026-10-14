@@ -12,6 +12,42 @@ cd "$OPENVPN"
 INTESTAZIONE='# Generato da entrypoint.sh'
 CERT="$PKI/issued/vpn_server.crt"
 
+# --- Predefinito di VPN_BLOCK_IPV6 per questo volume --------------------------
+
+# Il predefinito è 1 per un volume nuovo e 0 per un volume creato dalle versioni
+# precedenti, così l'aggiornamento non cambia il comportamento (vedi più sotto).
+# Si decide al primo avvio, prima di qualunque operazione lenta, e si memorizza
+# subito: un'interruzione durante la creazione della PKI non può cambiarlo.
+STATO_IPV6="$OPENVPN/.block-ipv6-default"
+
+# Scrittura atomica: un file a metà non può restare
+memorizza_ipv6() {
+    echo "$1" > "$STATO_IPV6.tmp"
+    mv "$STATO_IPV6.tmp" "$STATO_IPV6"
+}
+
+if [ ! -f "$STATO_IPV6" ]; then
+    # Un volume delle versioni precedenti si riconosce dalla PKI già completa o da un
+    # server.conf non generato qui. La PKI basta da sola: cancellare server.conf per
+    # rigenerarlo (il vecchio modo di ripartire) non deve far passare il volume a "nuovo".
+    if { [ -e "$PKI" ] && [ ! -e "$PKI_MARKER" ]; } ||
+       { [ -f "$OPENVPN/server.conf" ] && ! grep -q "^$INTESTAZIONE" "$OPENVPN/server.conf"; }; then
+        memorizza_ipv6 0
+    else
+        memorizza_ipv6 1
+    fi
+fi
+
+# --- Profili ------------------------------------------------------------------
+
+# Un profilo contiene la chiave privata del client e la chiave TLS. manage.sh li scrive
+# con permessi 600, ma quelli emessi dalle versioni precedenti sono leggibili da tutti:
+# in una cartella montata dall'host li leggerebbe qualunque utente locale.
+PROFILI_APERTI=$(find "$OPENVPN" -maxdepth 1 -name '*.ovpn' -perm /077 -exec chmod go-rwx {} + -print | wc -l)
+if [ "$PROFILI_APERTI" -gt 0 ]; then
+    echo "--- $PROFILI_APERTI profili .ovpn leggibili da altri utenti: portati a permessi 600 ---"
+fi
+
 # --- PKI ---------------------------------------------------------------------
 
 # Un avvio interrotto durante la creazione della PKI lascia il marcatore. Finché
@@ -22,7 +58,7 @@ if [ -e "$PKI_MARKER" ]; then
 fi
 
 if [ ! -e "$PKI" ]; then
-    echo "--- Setting up PKI ---"
+    echo "--- Creo la PKI ---"
     touch "$PKI_MARKER"
     ersa init-pki
     ersa build-ca nopass
@@ -51,8 +87,15 @@ giorni_certificato() {
     a=$(date -d "$(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)" +%s)
     echo $(( (a - da) / 86400 ))
 }
-if ! openssl x509 -in "$CERT" -noout -checkend $((30 * 86400)) >/dev/null || [ "$(giorni_certificato)" -lt 3000 ]; then
+# Un certificato emesso da questa versione dura MAX_DAYS: con meno di MAX_DAYS - 365
+# giorni di validità totale è uno delle versioni precedenti (825 giorni)
+VALIDITA_MINIMA=$((MAX_DAYS - 365))
+if ! openssl x509 -in "$CERT" -noout -checkend $((30 * 86400)) >/dev/null || [ "$(giorni_certificato)" -lt "$VALIDITA_MINIMA" ]; then
     echo "--- Rinnovo il certificato del server ---"
+    # easy-rsa sposta il certificato sostituito in pki/renewed e al rinnovo successivo si
+    # rifiuta di procedere finché le copie della volta prima sono lì ("conflicting file
+    # exists"): il certificato scaduto non si potrebbe più rinnovare. Non servono a nessuno.
+    rm -f "$PKI/renewed/issued/vpn_server.crt" "$PKI/renewed/private/vpn_server.key" "$PKI/renewed/reqs/vpn_server.req"
     if ! ersa --days="$MAX_DAYS" --renew-days="$MAX_DAYS" renew vpn_server nopass; then
         echo "Errore: rinnovo del certificato del server non riuscito." >&2
         openssl x509 -in "$CERT" -noout -checkend 0 >/dev/null ||
@@ -84,21 +127,15 @@ fi
 # (provato anche con server-ipv6): non riguarda il traffico che arriva dai client.
 # Chi ha IPv6 disattivato nel kernel non può configurare l'indirizzo IPv6 spinto
 # e non si connette: per questo c'è VPN_BLOCK_IPV6=0.
-# Il predefinito è 1 per un volume nuovo e 0 per un volume creato dalle versioni
-# precedenti, così l'aggiornamento non cambia il comportamento; viene memorizzato
-# per non cambiare al secondo avvio, quando server.conf avrà l'intestazione.
-STATO_IPV6="$OPENVPN/.block-ipv6-default"
-if [ ! -f "$STATO_IPV6" ]; then
-    if [ -f "$OPENVPN/server.conf" ] && ! grep -q "^$INTESTAZIONE" "$OPENVPN/server.conf"; then
-        echo 0 > "$STATO_IPV6"
-    else
-        echo 1 > "$STATO_IPV6"
-    fi
-fi
+# Un client OpenVPN 2.4 che non conosce block-ipv6 registra "Options error" e si
+# connette lo stesso (provato con 2.4.12; GCM richiede comunque almeno la 2.4).
+# Il predefinito del volume è stato deciso e memorizzato all'inizio.
 if [ -n "${VPN_BLOCK_IPV6:-}" ]; then
     BLOCCA_IPV6=$(to_bool "$VPN_BLOCK_IPV6"); ORIGINE="VPN_BLOCK_IPV6"
 else
-    BLOCCA_IPV6=$(cat "$STATO_IPV6"); ORIGINE="predefinito del volume"
+    BLOCCA_IPV6=$(<"$STATO_IPV6"); ORIGINE="predefinito del volume"
+    [[ "$BLOCCA_IPV6" =~ ^[01]$ ]] ||
+        die "$STATO_IPV6 contiene '$BLOCCA_IPV6': serve 0 o 1. Correggi il file o rimuovilo (senza il file, un volume con la PKI già creata parte senza il blocco)."
 fi
 if [ "$BLOCCA_IPV6" = 1 ]; then
     echo "--- IPv6 dei client: bloccato ($ORIGINE). VPN_BLOCK_IPV6=0 lo disattiva ---"
@@ -117,7 +154,7 @@ for d in "${DNS[@]}"; do
     CONF_DNS+="push \"dhcp-option DNS $d\""$'\n'
 done
 
-echo "--- Building server configuration ---"
+echo "--- Scrivo server.conf ---"
 cat <<EOF > "$OPENVPN/server.conf"
 $INTESTAZIONE a ogni avvio: le modifiche manuali vengono sovrascritte (usa server.custom.conf).
 port $VPN_PORT

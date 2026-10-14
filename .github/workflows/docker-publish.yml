@@ -6,20 +6,40 @@ on:
       - "main"
     tags:
       - "v*.*.*"
-    # Only rebuild when the image itself changes (not evaluated for tag pushes)
+    # Ricostruisce solo se cambia l'immagine (non vale per i push di tag)
     paths:
       - "docker/**"
       - ".github/workflows/docker-publish.yml"
 
 jobs:
-  docker:
+  # Il server di server-setup usa l'immagine "latest": uno script rotto pubblicato lì
+  # sostituirebbe il container funzionante con uno che si ferma all'avvio (e con
+  # restart: unless-stopped lo riavvia in continuazione). Si pubblica solo se questo passa.
+  verifica:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # latest and sha-<commit> come from main; <version> from a vX.Y.Z tag.
-      # A tag run does not publish sha-<commit>, so it cannot overwrite the main build.
+      - name: Sintassi e shellcheck
+        run: |
+          for f in docker/*.sh tests/*.sh; do bash -n "$f"; done
+          shellcheck -x -P SCRIPTDIR docker/*.sh tests/*.sh
+
+      # Un'inizializzazione completa, un client che si connette e la revoca: bastano
+      # a vedere un avvio rotto. La suite intera (tests/run.sh) si lancia a mano.
+      - name: Prove end-to-end
+        run: tests/run.sh t_manage t_revoke
+
+  docker:
+    needs: verifica
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # latest e sha-<commit> vengono da main, <version> da un tag vX.Y.Z.
+      # Un tag non pubblica sha-<commit>, quindi non può sovrascrivere la build di main.
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
@@ -44,15 +64,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # A release tag is published once: rebuilding it would change an image that
-      # compose files already pin
-      - name: Refuse to overwrite a release
+      # Una release si pubblica una volta sola: ricostruirla cambierebbe un'immagine
+      # che i file compose hanno già fissato
+      - name: Rifiuta di sovrascrivere una release
         if: github.ref_type == 'tag'
         env:
           RELEASE: ${{ secrets.DOCKERHUB_USERNAME }}/docker-vpn:${{ steps.meta.outputs.version }}
         run: |
           if docker buildx imagetools inspect "$RELEASE" > /dev/null 2>&1; then
-            echo "::error::$RELEASE already exists and is not overwritten. Publish a new version instead."
+            echo "::error::$RELEASE esiste già e non viene sovrascritta. Pubblica una nuova versione."
             exit 1
           fi
 
