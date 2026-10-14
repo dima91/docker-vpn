@@ -15,8 +15,6 @@ probe_v6() {
     V6_MS=$(( $(now_ms) - t0 ))
     echo "    instradamento: ${V6_DEV:-nessuno}; ping6: $(echo "$V6_OUT" | grep -im1 'unreach\|bytes from\|packet loss' | cut -c1-70) (${V6_MS} ms)"
 }
-conf_ha() { vol "grep -q '$1' /d/server.conf"; }
-riavvia() { docker rm -f $P-srv >/dev/null 2>&1; srv_start "$@"; srv_ready 120; }
 
 echo "[#8] volume nuovo: blocco attivo per impostazione predefinita (variabile vuota, come da compose)"
 srv_start -e VPN_BLOCK_IPV6= ; srv_ready || { fail "avvio"; docker logs $P-srv 2>&1 | tail -4; }
@@ -29,14 +27,47 @@ sleep 1; probe_v6
 { echo "$V6_OUT" | grep -qi unreach && [ "$V6_MS" -lt 3000 ]; } && pass "rifiutato subito (client che applica block-ipv6)" || fail "non rifiutato subito"
 check "l'IPv4 passa nel tunnel" docker exec $P-cli ping -c1 -W3 $GW
 
-echo "[#7] client che ignora block-ipv6 (come un client OpenVPN 2.4): nessuna perdita"
+# conta_uscite: pacchetti ICMPv6 echo-request che hanno lasciato eth0 del client, cioè la sua rete
+# fuori dal tunnel (vuoto se ip6tables non funziona)
+conta_uscite() { docker exec $P-cli ip6tables -nvxL OUTPUT 2>/dev/null | awk '/ipv6-icmp/ {print $1; exit}'; }
+# nessuna_perdita: un ping IPv6 verso Internet non esce da eth0. Non basta che manchi la risposta:
+# la rete di prova non ha NAT66 e non ne arriverebbe comunque. Si contano i pacchetti in uscita da eth0,
+# e un ping verso il gateway della rete di prova (che esce da eth0) dimostra che il contatore li vede.
+nessuna_perdita() {
+    local prima dopo
+    docker exec $P-cli ip6tables -I OUTPUT -o eth0 -p icmpv6 --icmpv6-type echo-request
+    prima=$(conta_uscite)
+    probe_v6
+    dopo=$(conta_uscite)
+    [[ "$prima" =~ ^[0-9]+$ && "$dopo" =~ ^[0-9]+$ ]] || { fail "contatore ip6tables non disponibile nel client"; return; }
+    [ "$dopo" = "$prima" ] && pass "nessun pacchetto IPv6 esce da eth0: l'IPv6 resta nel tunnel" || fail "$((dopo - prima)) pacchetti IPv6 sono usciti da eth0"
+    docker exec $P-cli ping -6 -c1 -W2 fd00:aaaa::1 >/dev/null 2>&1
+    [ "$(conta_uscite)" -gt "$dopo" ] && pass "il contatore vede i pacchetti che escono da eth0 (la prova non è vuota)" || fail "il contatore non vede nemmeno un ping fuori dal tunnel"
+}
+
+echo "[#7] client che ignora block-ipv6 (simulato con --pull-filter): nessuna perdita"
 cli_start $P-cli alice --proto udp4 --pull-filter ignore block-ipv6; wait_log $P-cli "Initialization Sequence Completed" 30 || fail "connessione"
-sleep 1; probe_v6
+sleep 1
+nessuna_perdita
 [ "$V6_DEV" = "dev tun0" ] && pass "l'IPv6 va nel tunnel" || fail "l'IPv6 esce da '$V6_DEV'"
-# Un block-ipv6 lato server non fa rispondere il server ai pacchetti dei client (provato, anche con
-# server-ipv6): per questi client il traffico è scartato in silenzio. Si garantisce l'assenza di perdite.
-echo "$V6_OUT" | grep -qi "bytes from" && fail "l'IPv6 del client è arrivato a destinazione" || pass "nessuna risposta da Internet: l'IPv6 non esce dal tunnel"
 docker rm -f $P-cli >/dev/null
+
+echo "[#7] client OpenVPN 2.4 reale: non conosce block-ipv6, si connette lo stesso e non perde"
+if ensure_image $CLI24_IMG "$REPO/tests/client24"; then
+    CLI_IMG_PREDEFINITA=$CLI_IMG; CLI_IMG=$CLI24_IMG
+    cli_start $P-cli alice --proto udp4
+    wait_log $P-cli "Initialization Sequence Completed" 30 && pass "il client 2.4 si connette" || fail "il client 2.4 non si connette"
+    docker exec $P-cli openvpn --version | head -1 | grep -q "OpenVPN 2\.4" && pass "è un OpenVPN 2.4" || fail "versione di OpenVPN inattesa nell'immagine del client 2.4"
+    docker logs $P-cli 2>&1 | grep -q "Unrecognized option.*block-ipv6" && pass "per il client 2.4 block-ipv6 è un'opzione sconosciuta (non applicata)" || fail "il client 2.4 conosce block-ipv6: la prova non vale"
+    check "l'IPv4 passa nel tunnel" docker exec $P-cli ping -c1 -W3 $GW
+    sleep 1
+    nessuna_perdita
+    [ "$V6_DEV" = "dev tun0" ] && pass "l'IPv6 va nel tunnel" || fail "l'IPv6 esce da '$V6_DEV'"
+    docker rm -f $P-cli >/dev/null
+    CLI_IMG=$CLI_IMG_PREDEFINITA
+else
+    echo "  SKIP: immagine del client 2.4 non costruita (serve la rete per apt)"
+fi
 
 echo "[#10] valori che disattivano e attivano il blocco"
 for v in 0 false OFF No; do
@@ -72,4 +103,24 @@ riavvia -e VPN_BLOCK_IPV6=1 || fail "avvio con VPN_BLOCK_IPV6=1"
 conf_ha ifconfig-ipv6 && pass "VPN_BLOCK_IPV6=1 lo attiva esplicitamente" || fail "VPN_BLOCK_IPV6=1 non attiva il blocco"
 riavvia -e VPN_BLOCK_IPV6= || fail "avvio senza variabile"
 conf_ha ifconfig-ipv6 && fail "senza variabile il blocco è rimasto attivo" || pass "togliendo la variabile si torna al predefinito del volume"
+
+echo "[#8] volume vecchio senza server.conf né file del predefinito (vecchio modo di rigenerare la configurazione)"
+docker rm -f $P-srv >/dev/null
+vol 'rm -f /d/server.conf /d/.block-ipv6-default'
+riavvia -e VPN_BLOCK_IPV6= || { fail "avvio senza server.conf"; docker logs $P-srv 2>&1 | tail -4; }
+[ "$(vol 'cat /d/.block-ipv6-default 2>/dev/null')" = 0 ] && pass "la PKI già creata basta per riconoscere il volume vecchio: predefinito 0" || fail "predefinito persistito: '$(vol 'cat /d/.block-ipv6-default 2>&1')'"
+conf_ha ifconfig-ipv6 && fail "senza server.conf il volume vecchio è passato al blocco attivo" || pass "il blocco resta disattivato"
+
+echo "[#8] file del predefinito con contenuto non valido: errore chiaro, nessun valore indovinato"
+docker rm -f $P-srv >/dev/null
+vol 'printf "" > /d/.block-ipv6-default'
+srv_start -e VPN_BLOCK_IPV6=
+if srv_stopped 60; then
+    [ "$(srv_exit_code)" != 0 ] && pass "il container si ferma con codice $(srv_exit_code)" || fail "il container è uscito con codice 0"
+else
+    fail "il container non si è fermato"
+fi
+docker logs $P-srv 2>&1 | grep -q "block-ipv6-default" && pass "il messaggio nomina il file" || fail "il messaggio non nomina il file"
+docker rm -f $P-srv >/dev/null
+riavvia -e VPN_BLOCK_IPV6=0 || fail "con VPN_BLOCK_IPV6 impostato il file non serve"
 finish

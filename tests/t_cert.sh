@@ -36,6 +36,14 @@ seriale=$(vol 'openssl x509 -in /d/pki/issued/vpn_server.crt -noout -serial')
 docker rm -f $P-cli >/dev/null; srv_restart 60 || fail "riavvio"
 [ "$seriale" = "$(vol 'openssl x509 -in /d/pki/issued/vpn_server.crt -noout -serial')" ] && pass "un secondo avvio non rinnova di nuovo" || fail "rinnovo ripetuto a ogni avvio"
 
+echo "[#1] secondo rinnovo, quando pki/renewed ha già le copie del primo"
+docker rm -f $P-srv >/dev/null
+vol 'test -s /d/pki/renewed/issued/vpn_server.crt' && pass "(prima) pki/renewed contiene il certificato sostituito dal primo rinnovo" || fail "pki/renewed vuota: la prova non vale"
+out=$(avanti_nel_tempo 3630)        # a 20 giorni dalla scadenza
+echo "$out" | grep -i "rinnovo\|errore" | sed 's/^/    /'
+echo "$out" | grep -qi "non riuscito" && fail "il secondo rinnovo non riesce" || pass "il secondo rinnovo riesce"
+[ "$seriale" != "$(vol 'openssl x509 -in /d/pki/issued/vpn_server.crt -noout -serial')" ] && pass "il certificato è stato sostituito di nuovo" || fail "il certificato è lo stesso del primo rinnovo"
+
 echo "[#1] certificato scaduto da 75 giorni"
 restore_legacy
 avanti_nel_tempo 900 | grep -i "rinnovo\|errore" | sed 's/^/    /'
@@ -45,7 +53,7 @@ check "e verifica contro la CA invariata" docker run --rm --entrypoint faketime 
 
 echo "[#1] rinnovo che non riesce"
 restore_legacy
-vol 'mkdir -p /d/pki/renewed/issued && echo conflitto > /d/pki/renewed/issued/vpn_server.crt'
+vol 'touch /d/pki/renewed'     # easy-rsa non può creare la cartella: il rinnovo fallisce con il certificato ancora valido
 srv_start
 srv_ready && pass "certificato ancora valido: il server parte lo stesso" || { fail "il server non parte con un rinnovo fallito ma certificato valido"; docker logs $P-srv 2>&1 | tail -4; }
 docker logs $P-srv 2>&1 | grep -qi "non riuscito" && pass "il rinnovo fallito è segnalato" || fail "manca l'avviso di rinnovo non riuscito"

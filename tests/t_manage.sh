@@ -39,6 +39,23 @@ vol 'openssl x509 -in /d/pki/issued/breve.crt -noout -checkend $((29*86400))' >/
     ! vol 'openssl x509 -in /d/pki/issued/breve.crt -noout -checkend $((31*86400))' >/dev/null 2>&1 && pass "days=30 vale 30 giorni" || fail "days=30"
 out=$(mng gen-client cattivo abc); rc=$?
 { [ "$rc" != 0 ] && ! docker exec $P-srv test -e /etc/openvpn/pki/issued/cattivo.crt; } && pass "days non numerico rifiutato prima di emettere" || fail "days=abc: codice $rc"
+for d in 3651 99999999 99999999999999999999999; do
+    out=$(mng gen-client lungo $d); rc=$?
+    { [ "$rc" != 0 ] && echo "$out" | grep -q "non può superare 3650" && ! docker exec $P-srv bash -c 'ls /etc/openvpn/pki/reqs/lungo.req /etc/openvpn/pki/private/lungo.key /etc/openvpn/pki/issued/lungo.crt' >/dev/null 2>&1; } &&
+        pass "days=$d rifiutato prima di emettere" || fail "days=$d: codice $rc, $(echo "$out" | tail -1)"
+done
+mng gen-client massimo 3650 >/dev/null
+vol 'openssl x509 -in /d/pki/issued/massimo.crt -noout -checkend $((3285*86400))' >/dev/null 2>&1 && pass "days=3650 (il massimo) è accettato" || fail "days=3650"
+
+echo "[round 2] emissione interrotta: richiesta e chiave senza certificato non bloccano il nome"
+docker exec $P-srv easyrsa --batch --pki-dir=/etc/openvpn/pki gen-req interrotto nopass >/dev/null 2>&1   # niente firma
+docker exec $P-srv test -s /etc/openvpn/pki/reqs/interrotto.req || fail "(prima) manca la richiesta di prova"
+out=$(mng revoke-client interrotto); rc=$?
+[ "$rc" != 0 ] && pass "revoke-client non conosce il nome senza certificato" || fail "revoke-client interrotto: codice $rc"
+out=$(mng gen-client interrotto); rc=$?
+[ "$rc" = 0 ] && docker exec $P-srv test -s /etc/openvpn/interrotto.ovpn && pass "gen-client ripulisce i resti e emette il certificato" || fail "gen-client dopo un'emissione interrotta: codice $rc, $(echo "$out" | tail -2 | tr '\n' ' ')"
+connects $P-cli interrotto 30 && pass "il client emesso dopo la pulizia si connette" || fail "client dopo la pulizia"
+docker rm -f $P-cli >/dev/null
 
 echo "[round 1/#2] nessun profilo mentre l'inizializzazione non è finita"
 docker exec $P-srv touch /etc/openvpn/.pki-init

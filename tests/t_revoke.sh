@@ -44,7 +44,7 @@ echo "[#11] la revoca normale rimuove anche il profilo"
 mng revoke-client dave >/dev/null
 docker exec $P-srv test -e /etc/openvpn/dave.ovpn && fail "dave.ovpn è rimasto dopo la revoca" || pass "dave.ovpn rimosso"
 out=$(mng revoke-client nessuno); rc=$?
-{ [ "$rc" != 0 ] && ! echo "$out" | grep -q "Revoked access"; } && pass "un nome inesistente è un errore" || fail "nome inesistente: codice $rc"
+{ [ "$rc" != 0 ] && ! echo "$out" | grep -q "Accesso revocato"; } && pass "un nome inesistente è un errore" || fail "nome inesistente: codice $rc"
 
 echo "[#12] nomi riservati e non validi"
 for n in vpn_server ca; do

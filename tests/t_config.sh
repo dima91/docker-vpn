@@ -3,8 +3,6 @@
 # protocollo normalizzato.
 . "$(dirname "$0")/lib.sh"; cleanup
 echo "[config] immagine=$IMG"
-conf_ha() { vol "grep -q '$1' /d/server.conf"; }
-riavvia() { docker rm -f $P-srv >/dev/null 2>&1; srv_start "$@"; srv_ready 120; }
 
 echo "[#9] DNS predefinito e configurabile"
 srv_start; srv_ready || { fail "avvio"; docker logs $P-srv 2>&1 | tail -4; }

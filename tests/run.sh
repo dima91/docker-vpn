@@ -3,9 +3,8 @@
 # risorse "vpntest-*". Uso: tests/run.sh [t_init t_cert ...]
 # Ogni PKI nuova genera i parametri DH: l'intera suite richiede diversi minuti.
 cd "$(dirname "$0")" || exit 2
-. ./lib.sh
+. ./lib.sh   # costruisce anche le immagini di prova
 
-ensure_images
 cleanup
 
 if [ "$#" -gt 0 ]; then

@@ -1,3 +1,4 @@
 # Intenzionali nei test: pass/fail riescono sempre (A && pass || fail va bene), le virgolette
-# singole passano il comando al container che espande le variabili, SC2086 vale per $P.
-disable=SC2119,SC2120,SC2015,SC2016,SC2086,SC2155,SC2329,SC1091
+# singole passano il comando al container che espande le variabili, SC2086 vale per $P,
+# SC2034 per le variabili che i test impostano e legge lib.sh (CLI_DOCKER, MNG_ENV).
+disable=SC2119,SC2120,SC2015,SC2016,SC2086,SC2155,SC2329,SC1091,SC2034

@@ -4,8 +4,11 @@
 echo "[upgrade] vecchia=$OLD_IMG nuova=$IMG"
 make_legacy
 ca=$(vol 'sha1sum /d/pki/ca.crt')
+[ "$(vol 'stat -c %a /d/alice.ovpn /d/bob.ovpn' | sort -u)" = 644 ] && pass "(prima) i profili dell'immagine vecchia sono leggibili da tutti (644)" || fail "(prima) permessi dei profili vecchi: $(vol 'stat -c %a /d/alice.ovpn /d/bob.ovpn' | tr '\n' ' ')"
 srv_start; srv_ready || { fail "avvio della nuova immagine sul volume vecchio"; docker logs $P-srv 2>&1 | tail -6; }
 [ "$ca" = "$(vol 'sha1sum /d/pki/ca.crt')" ] && pass "la CA non è toccata" || fail "la CA è cambiata"
+[ "$(vol 'stat -c %a /d/alice.ovpn /d/bob.ovpn' | sort -u)" = 600 ] && pass "i profili vecchi, con la chiave privata del client, sono portati a 600" || fail "permessi dei profili dopo l'aggiornamento: $(vol 'stat -c %a /d/alice.ovpn /d/bob.ovpn' | tr '\n' ' ')"
+docker logs $P-srv 2>&1 | grep -q "profili .ovpn leggibili da altri utenti" && pass "l'avvio segnala la correzione dei permessi" || fail "nessun avviso sui permessi"
 vol 'grep -q crl-verify /d/server.conf && ls /d/server.conf.bak.* >/dev/null 2>&1 && ! grep -q crl-verify /d/server.conf.bak.*' && pass "server.conf nuovo, quello vecchio salvato in .bak.<data>" || fail "salvataggio di server.conf"
 connects $P-cli alice 30 && pass "un profilo emesso dall'immagine vecchia si connette" || fail "profilo vecchio"
 docker rm -f $P-cli >/dev/null

@@ -14,9 +14,11 @@ echo "[#2] avvio ucciso durante la generazione dei parametri DH"
 srv_start
 for _ in $(seq 1 100); do docker exec $P-srv test -s /etc/openvpn/pki/ca.crt 2>/dev/null && break; sleep 0.2; done
 docker kill $P-srv >/dev/null; docker rm -f $P-srv >/dev/null
+[ "$(vol 'cat /d/.block-ipv6-default 2>/dev/null')" = 1 ] && pass "il predefinito di VPN_BLOCK_IPV6 è già memorizzato prima della fine della PKI" || fail "predefinito di VPN_BLOCK_IPV6 non memorizzato: '$(vol 'cat /d/.block-ipv6-default 2>&1')'"
 srv_start
 srv_ready && pass "il riavvio completa l'inizializzazione" || { fail "il riavvio non completa l'inizializzazione"; docker logs $P-srv 2>&1 | tail -4; }
 check "PKI coerente dopo la ripresa" pki_coerente
+[ "$(vol 'cat /d/.block-ipv6-default 2>/dev/null')" = 1 ] && pass "e resta 1 dopo la ripresa" || fail "predefinito dopo la ripresa: '$(vol 'cat /d/.block-ipv6-default 2>&1')'"
 mng gen-client alice >/dev/null
 connects $P-cli alice 30 && pass "un client emesso dopo la ripresa si connette" || fail "client dopo la ripresa"
 cleanup
@@ -63,7 +65,8 @@ rifiutata() {
     else fail "$assegnazione: codice $rc, messaggio: $(echo "$out" | tail -1)"; fi
 }
 for a in VPN_SUBNET=10.8.0.0/24 VPN_SUBNET=10.8.0.1 VPN_SUBNET=999.1.1.0 VPN_PORT=0 VPN_PORT=70000 \
-         VPN_PORT=abc VPN_PROTO=icmp VPN_BLOCK_IPV6=maybe VPN_DNS=non-un-ip; do
+         VPN_PORT=abc VPN_PROTO=icmp VPN_BLOCK_IPV6=maybe VPN_DNS=non-un-ip VPN_DNS=1.1.1.256 \
+         VPN_DNS=1.1.1.1,,8.8.8.8 VPN_DNS=2606:4700:4700::1111 VPN_DNS=abc:def VPN_DNS=:::; do
     rifiutata "$a"
 done
 finish
