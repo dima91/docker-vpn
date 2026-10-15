@@ -1,10 +1,10 @@
 # Impostazioni comuni a tutti i servizi VPN.
 # VPN_IMAGE (nel file .env) sostituisce l'immagine, ad esempio con quella di un fork.
-# La release 1.0.0 esiste solo dopo il push del tag v1.0.0: finché non c'è, "manifest not found"
+# La release 1.0.1 esiste solo dopo il push del tag v1.0.1: finché non c'è, "manifest not found"
 # si risolve con VPN_IMAGE=dockerdima/docker-vpn:latest (vedi "Image tags" nel README).
 # Per costruire l'immagine dai sorgenti in ../docker usa anche docker-compose.build.yml.
 x-vpn: &vpn
-  image: ${VPN_IMAGE:-dockerdima/docker-vpn:1.0.0}
+  image: ${VPN_IMAGE:-dockerdima/docker-vpn:1.0.1}
   cap_add:
     - NET_ADMIN
   sysctls:
