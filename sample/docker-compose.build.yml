@@ -1,0 +1,10 @@
+# Costruisce l'immagine dai sorgenti in ../docker invece di scaricarla da Docker Hub:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# L'immagine locale ha un nome proprio, così non si scambia per una release pubblicata.
+x-build: &build
+  image: docker-vpn:local
+  build: ../docker
+
+services:
+  vpn-personal: *build
+  vpn-work: *build

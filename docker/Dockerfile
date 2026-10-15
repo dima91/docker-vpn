@@ -6,7 +6,11 @@ RUN apt update && apt upgrade -y && \
     rm -rf /var/lib/apt/lists/*
 
 ENV OPENVPN=/etc/openvpn
+# Validità della CRL: quella predefinita di easy-rsa (180 giorni) bloccherebbe
+# tutti i client alla scadenza. Vale per entrypoint.sh, manage.sh e docker exec.
+ENV EASYRSA_CRL_DAYS=3650
 
+COPY common.sh /usr/local/lib/vpn-common.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY manage.sh /usr/local/bin/manage.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/manage.sh /usr/local/bin/easyrsa
