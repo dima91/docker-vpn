@@ -1,37 +1,46 @@
+# Impostazioni comuni a tutti i servizi VPN.
+# VPN_IMAGE (nel file .env) sostituisce l'immagine, ad esempio con quella di un fork.
+# La release 1.0.0 esiste solo dopo il push del tag v1.0.0: finché non c'è, "manifest not found"
+# si risolve con VPN_IMAGE=dockerdima/docker-vpn:latest (vedi "Image tags" nel README).
+# Per costruire l'immagine dai sorgenti in ../docker usa anche docker-compose.build.yml.
+x-vpn: &vpn
+  image: ${VPN_IMAGE:-dockerdima/docker-vpn:1.0.0}
+  cap_add:
+    - NET_ADMIN
+  sysctls:
+    - net.ipv4.ip_forward=1
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  restart: unless-stopped
+
 services:
   vpn-personal:
-    image: dockerdima/docker-vpn:latest
+    <<: *vpn
     container_name: vpn-personal
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv4.ip_forward=1
-    devices:
-      - /dev/net/tun:/dev/net/tun
     ports:
-      - "1194:1194/udp"
+      - "1194:1194/${VPN_PROTO:-udp}"
     environment:
+      - PUBLIC_IP=${PUBLIC_IP:-}
+      - VPN_PROTO=${VPN_PROTO:-udp}
+      - VPN_BLOCK_IPV6=${VPN_BLOCK_IPV6:-}
+      - VPN_DNS=${VPN_DNS:-}
       - VPN_PORT=1194
       - VPN_SUBNET=10.8.0.0
     volumes:
       - ./data/personal:/etc/openvpn
-    restart: unless-stopped
 
 
   vpn-work:
-    image: dockerdima/docker-vpn:latest
+    <<: *vpn
     container_name: vpn-work
-    cap_add:
-      - NET_ADMIN
-    sysctls:
-      - net.ipv4.ip_forward=1
-    devices:
-      - /dev/net/tun:/dev/net/tun
     ports:
-      - "1195:1195/udp"
+      - "1195:1195/${VPN_PROTO:-udp}"
     environment:
+      - PUBLIC_IP=${PUBLIC_IP:-}
+      - VPN_PROTO=${VPN_PROTO:-udp}
+      - VPN_BLOCK_IPV6=${VPN_BLOCK_IPV6:-}
+      - VPN_DNS=${VPN_DNS:-}
       - VPN_PORT=1195
       - VPN_SUBNET=10.8.10.0
     volumes:
       - ./data/work:/etc/openvpn
-    restart: unless-stopped
