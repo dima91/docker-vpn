@@ -182,12 +182,17 @@ The image is published to Docker Hub as `dockerdima/docker-vpn` whenever the `do
 | `sha-<commit>` | The build of one commit of `main`. Re-running the workflow for the same commit rebuilds it. |
 | `<version>`    | A release, such as `1.0.0`, built from the git tag `v1.0.0`. It is published once: the workflow refuses to overwrite an existing version. |
 
-`sample/docker-compose.yml` refers to a release so that the same file always runs the same image. To publish a release:
+`sample/docker-compose.yml` refers to a release so that the same file always runs the same image. The project follows git flow (`main` holds the releases, `develop` the work in progress), so a release is prepared on a `release/<version>` branch:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git flow release start 1.0.0
+# On this branch only the release number (the image in sample/docker-compose.yml and
+# the VPN_IMAGE example above) and fixes change; no new features.
+git flow release finish -m "Release 1.0.0" 1.0.0
+git push origin main develop v1.0.0
 ```
+
+Give git flow the bare number (`1.0.0`): its version tag prefix is `v`, so `release finish` merges the branch into `main` and `develop` and creates the tag `v1.0.0` itself. Pushing `main` publishes `latest` and `sha-<commit>`; pushing the tag publishes `1.0.0`.
 
 Until `v1.0.0` has been pushed there is no `1.0.0` image, and `docker compose up -d` fails with `manifest ... not found`. In that case set `VPN_IMAGE=dockerdima/docker-vpn:latest` in `sample/.env`, or build the image yourself.
 
