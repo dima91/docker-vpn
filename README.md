@@ -38,7 +38,7 @@ This project provides a straightforward way to set up a personal or small-team V
     # VPN_PROTO=udp
 
     # Optional: use another image, for example the one published by your fork
-    # VPN_IMAGE=your-user/docker-vpn:1.0.0
+    # VPN_IMAGE=your-user/docker-vpn:1.0.1
     ```
 
     Ports and subnets are set per service in `docker-compose.yml`.
@@ -194,6 +194,6 @@ git push origin main develop v1.0.0
 
 Give git flow the bare number (`1.0.0`): its version tag prefix is `v`, so `release finish` merges the branch into `main` and `develop` and creates the tag `v1.0.0` itself. Pushing `main` publishes `latest` and `sha-<commit>`; pushing the tag publishes `1.0.0`.
 
-Until `v1.0.0` has been pushed there is no `1.0.0` image, and `docker compose up -d` fails with `manifest ... not found`. In that case set `VPN_IMAGE=dockerdima/docker-vpn:latest` in `sample/.env`, or build the image yourself.
+Until `v1.0.1` has been pushed there is no `1.0.1` image (`1.0.0` was tagged but never published, because the CI check failed), and `docker compose up -d` fails with `manifest ... not found`. In that case set `VPN_IMAGE=dockerdima/docker-vpn:latest` in `sample/.env`, or build the image yourself.
 
 Before anything is published, the workflow checks the scripts with `shellcheck` and runs two of the end-to-end tests (`t_manage`, `t_revoke`); if they fail, no image is pushed.
